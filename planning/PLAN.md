@@ -454,3 +454,43 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 - Portfolio visualization: heatmap renders with correct colors, P&L chart has data points
 - AI chat (mocked): send a message, receive a response, trade execution appears inline
 - SSE resilience: disconnect and verify reconnection
+
+---
+
+## 13. Document Review — Questions, Clarifications & Simplification Opportunities
+
+*Added 2026-04-02. Reviewed against the current project state (market data backend complete, everything else still to be built).*
+
+### Questions & Clarifications
+
+1. **`backend/db/` vs top-level `db/` — two `db/` directories is confusing.** Section 4 says `backend/db/` holds schema SQL and seed logic, while the top-level `db/` is the runtime volume mount. In practice, the backend code will need a clear, documented path resolution strategy — does the backend write to `../db/finally.db` relative to itself, or to an absolute path like `/app/db/finally.db`? This should be made explicit, especially since local development (outside Docker) needs to work too.
+
+2. **"Lazy initialization on first request" vs "on startup" — which is it?** Section 7 says both ("checks for the SQLite database on startup (or first request)"). Pick one. Startup initialization is simpler and avoids a race condition where concurrent first requests could both try to create tables. Recommendation: initialize on startup via a FastAPI lifespan event.
+
+3. **SSE pushes all tickers to all clients — will this scale?** Section 6 says the SSE endpoint pushes "all tickers known to the system" at ~500ms cadence. If a user adds 50 tickers, every SSE event becomes large. For the single-user MVP this is fine, but the doc mentions "supports future multi-user scenarios" — in that world, per-user filtered streams would be needed. Worth noting this as a known limitation rather than implying it scales.
+
+4. **What happens to the market data source when tickers are added/removed?** The watchlist is user-facing, but the simulator/Massive client needs to know which tickers to generate/poll. The plan doesn't specify who calls `source.add_ticker()` / `source.remove_ticker()` when the watchlist changes. This glue logic (watchlist CRUD -> market data source sync) should be called out.
+
+5. **Chat history loading — how much?** Section 9 step 2 says "loads recent conversation history." How many messages? The entire history? Last N messages? A token budget? This matters for LLM context window management and cost. Recommend specifying a concrete limit (e.g., last 20 messages or ~4K tokens of history).
+
+6. **`portfolio_snapshots` — what's the retention policy?** Snapshots every 30 seconds accumulate fast (2,880/day). For a demo that runs for hours, this table could grow large with no cleanup. Is there a max retention period or a downsampling strategy? For the MVP, a simple "keep last 24 hours" policy would be sufficient.
+
+7. **Trade execution price — "current price" from where?** Section 2 says trades fill "at current price." Is that the latest price in the `PriceCache`? What if the cache has no price for a ticker (e.g., the user manually types a ticker not on any watchlist)? The plan should specify: trades can only execute for tickers that have a cached price, and the fill price is the cache's latest.
+
+8. **No `GET /api/trades` endpoint.** There's a `trades` table but no API endpoint to retrieve trade history. The frontend positions table could benefit from a "recent trades" view. Is this intentional omission or oversight?
+
+9. **LLM model choice — `openrouter/openai/gpt-oss-120b`?** This model string appears only in section 9. If it's unavailable or deprecated on OpenRouter, the entire chat feature breaks. Consider specifying a fallback model, or at least making the model name configurable via environment variable.
+
+### Simplification Opportunities
+
+1. **Drop the `user_id` column from all tables.** The plan explicitly states: no auth, no login, single user. The `user_id` column on every table is speculative infrastructure for "future multi-user support" that adds complexity now (default values, unique constraints involving user_id, query filtering) for a future that may never arrive. If multi-user is ever needed, a schema migration at that point is trivial. Remove it and simplify every query.
+
+2. **Drop `users_profile` table — use a config constant.** With single user and no auth, the cash balance can start as a constant (`10000.0`) and be derived from: `initial_cash - sum(buys) + sum(sells)` using the `trades` table. This eliminates a table and removes the need to keep `cash_balance` in sync with trades (a potential source of bugs). The trades table is already the source of truth.
+
+3. **Drop the `chat_messages` table — use frontend state.** Chat history is only used for (a) LLM context and (b) displaying conversation on refresh. For a demo app, losing chat on refresh is acceptable. The frontend can hold messages in React state, send the recent history array with each `/api/chat` request, and the backend becomes stateless for chat. This removes a table, simplifies the backend, and eliminates the "how much history to load" question.
+
+4. **Simplify the Dockerfile description.** The plan specifies Node 20 and Python 3.12 — these will be outdated quickly. Specify "Node LTS" and "Python 3.12+" instead, or just leave version choice to the implementer. The Dockerfile section is detailed enough to be prescriptive but not detailed enough to be copy-paste — it's in an awkward middle ground.
+
+5. **Consider dropping Playwright E2E tests from the initial build.** The E2E test infrastructure (separate docker-compose, Playwright container, LLM mock mode) is substantial. For a capstone demo project, comprehensive backend unit tests + manual testing may be sufficient for the initial build, with E2E added as a follow-up. This would let the team focus on shipping the visible product first.
+
+6. **The `positions` table duplicates data derivable from `trades`.** Current position quantity and average cost can be computed from the trades log. Keeping a separate `positions` table means two sources of truth that must stay in sync. For the expected data volume (one user, handful of trades), computing positions on the fly from trades is fast and eliminates a class of bugs. If performance ever matters, add it as a materialized cache later.
